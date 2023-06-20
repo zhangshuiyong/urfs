@@ -129,7 +129,7 @@ impl From<UrchinStatusCode> for UrchinFileStatus{
     }
 }
 
-async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,digest: Digest,total_size:u64) -> Result<UrchinFileStatus> {
+async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,digest: &Digest,total_size:u64) -> Result<UrchinFileStatus> {
 
     let httpclient = get_http_client()?;
 
@@ -281,63 +281,70 @@ impl DatasetUploader {
         println!("dataset_meta info:{:?}",dataset_meta);
         println!("dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
 
-
-
-        //self.upload_meta(dataset_meta_path,dataset_meta.clone(),server_endpoint.clone()).await?;
+        self.upload_meta("xxx".to_string(),"default".to_string(),dataset_meta_path,dataset_meta.clone(),server_endpoint.clone()).await?;
 
         self.upload_blob("xxx".to_string(),"default".to_string(), dataset_blob_path,dataset_meta.clone(),server_endpoint.clone()).await?;
-
 
         Ok(())
     }
 
-    pub async fn upload_meta(&self, dataset_meta_path: PathBuf,dataset_meta:DatasetMeta,upload_endpoint: String) -> Result<()> {
+    pub async fn upload_meta(&self,dataset_id:String, dataset_version_id:String, dataset_meta_path: PathBuf,dataset_meta:DatasetMeta,server_endpoint: String) -> Result<()> {
 
-        println!("dataset_meta_path: {:?}",dataset_meta_path);
-
-        println!("dataset_meta info:{:?}",dataset_meta);
-
-        let mut meta_file= File::open(dataset_meta_path.as_path()).await?;
-
-        //ToDo: should be remove!!!
-        let fi = meta_file.metadata().await?;
-
-        println!("[upload_meta]: file meta {:?}",fi);
+        let mut meta_file = File::open(dataset_meta_path.as_path()).await?;
+        let local_meta_file_info = meta_file.metadata().await?;
+        println!("[upload_meta]: local meta file info {:?}", local_meta_file_info);
 
         let digest = Digest::new("urfs".to_string(),dataset_meta.id.clone());
+        let meta_file_size = local_meta_file_info.len();
+        let data_mode = DataMode::Meta.to_string();
 
-        let meta_file_name = dataset_meta_path.file_name().unwrap().to_str().unwrap().to_string();
+        let meta_file_status = stat_file(server_endpoint.as_str(),data_mode.as_str(),
+                                         dataset_id.as_str(),dataset_version_id.as_str(),
+                                         &digest,meta_file_size).await?;
 
-        let mut contents:Vec<u8> = vec![];
+        //ToDo: process UnKnown File Status!!!
+        if meta_file_status == UrchinFileStatus::UnKnown {
+            println!("[stat_file] Meta file status is unknown, please check and stop upload process !!! ");
+        }else if meta_file_status == UrchinFileStatus::Exist {
+            println!("[stat_file] Meta file exist in backend, upload Finish !!! ");
+        }else {
 
-        meta_file.read_to_end(&mut contents).await?;
+            let meta_file_name = dataset_meta_path.file_name().unwrap().to_str().unwrap().to_string();
 
-        let file_part = multipart::Part::bytes(contents)
-            .file_name(meta_file_name)
-            .mime_str("application/octet-stream")?;
+            let mut contents: Vec<u8> = vec![];
 
-        let form = multipart::Form::new()
-            .part("file", file_part)
-            .text("mode",DataMode::Meta.to_string())
-            .text("dataset_id","xxx")
-            .text("dataset_version_id","default")
-            .text("digest",digest.to_string())
-            .text("total_size",fi.len().to_string());
+            //meta file do not need to chunk upload
+            meta_file.read_to_end(&mut contents).await?;
 
-        let httpclient = get_http_client()?;
+            let file_part = multipart::Part::bytes(contents)
+                .file_name(meta_file_name)
+                .mime_str("application/octet-stream")?;
 
-        let upload_meta_url = upload_endpoint + "/api/v1/file/upload";
+            let form = multipart::Form::new()
+                .part("file", file_part)
+                .text("mode", data_mode)
+                .text("dataset_id", dataset_id)
+                .text("dataset_version_id", dataset_version_id)
+                .text("digest", digest.to_string())
+                .text("total_size", meta_file_size.to_string());
 
-        println!("[upload_meta]: upload meta url {:?}",upload_meta_url);
+            let httpclient = get_http_client()?;
 
-        let resp = httpclient
-            .put(upload_meta_url)
-            .multipart(form)
-            .send().await?;
+            let upload_meta_url = server_endpoint + "/api/v1/file/upload";
 
-        let result = resp.text().await?;
+            println!("[upload_meta]: upload meta url {:?}", upload_meta_url);
 
-        println!("upload dataset_meta finish, result:{}!!!",result);
+            let resp = httpclient
+                .put(upload_meta_url)
+                .multipart(form)
+                .send().await?;
+
+            //ToDo: process meta file upload response!
+            let result = resp.text().await?;
+
+            println!("upload dataset_meta finish, result:{}!!!", result);
+        }
+
         Ok(())
     }
 
@@ -346,7 +353,9 @@ impl DatasetUploader {
         let digest = Digest::new("urfs".to_string(),dataset_meta.id.clone());
 
         let blob_file_status = stat_file(server_endpoint.as_str(),DataMode::Blob.to_string().as_str(),
-                                         "xxx","default",digest,dataset_meta.compressed_size).await?;
+                                         dataset_id.as_str(),dataset_version_id.as_str(),
+                                         &digest,dataset_meta.compressed_size).await?;
+
         //ToDo: process UnKnown File Status!!!
         if blob_file_status == UrchinFileStatus::UnKnown {
             println!("[stat_file] Blob file status is unknown, please check and stop upload process !!! ");
